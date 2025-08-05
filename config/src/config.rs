@@ -1,10 +1,9 @@
-use std::io::Read;
-use std::time::Duration;
-use serde_derive::Serialize; 
-use serde_derive::Deserialize; 
-use std::fs::File;
-use std::path::{Path};
 use crate::loader::*;
+use serde_derive::Deserialize;
+use serde_derive::Serialize;
+use std::fs::File;
+use std::path::Path;
+use std::time::Duration;
 
 use libc::fcntl;
 
@@ -13,12 +12,16 @@ const DEFAULT_AUX_BUFFER_SIZE: usize = 4096;
 fn into_absolute_path(path_to_sharedir: &str, path_to_file: String) -> String {
     let path_to_default_config = Path::new(&path_to_file);
 
-    if path_to_default_config.is_relative(){
+    if path_to_default_config.is_relative() {
         let path = &format!("{}/{}", path_to_sharedir, path_to_file);
         let absolute_path = Path::new(&path);
-        return absolute_path.canonicalize().unwrap().to_str().unwrap().to_string();
-    }
-    else{
+        return absolute_path
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+    } else {
         return path_to_default_config.to_str().unwrap().to_string();
     }
 }
@@ -37,17 +40,27 @@ pub struct QemuKernelConfig {
     pub debug: bool,
 }
 
-impl QemuKernelConfig{
-    pub fn new_from_loader(default_config_folder: &str, default: QemuKernelConfigLoader, config: QemuKernelConfigLoader) -> Self {
-        let mut qemu_binary = config.qemu_binary.or(default.qemu_binary).expect("no qemu_binary specified");
-        let mut kernel = config.kernel.or(default.kernel).expect("no kernel specified");
+impl QemuKernelConfig {
+    pub fn new_from_loader(
+        default_config_folder: &str,
+        default: QemuKernelConfigLoader,
+        config: QemuKernelConfigLoader,
+    ) -> Self {
+        let mut qemu_binary = config
+            .qemu_binary
+            .or(default.qemu_binary)
+            .expect("no qemu_binary specified");
+        let mut kernel = config
+            .kernel
+            .or(default.kernel)
+            .expect("no kernel specified");
         let mut ramfs = config.ramfs.or(default.ramfs).expect("no ramfs specified");
-        
+
         qemu_binary = into_absolute_path(default_config_folder, qemu_binary);
         kernel = into_absolute_path(default_config_folder, kernel);
         ramfs = into_absolute_path(default_config_folder, ramfs);
 
-        Self{
+        Self {
             qemu_binary: qemu_binary,
             kernel: kernel,
             ramfs: ramfs,
@@ -72,21 +85,33 @@ pub struct QemuSnapshotConfig {
     pub debug: bool,
 }
 
-impl QemuSnapshotConfig{
-    pub fn new_from_loader(default_config_folder: &str, default: QemuSnapshotConfigLoader, config: QemuSnapshotConfigLoader) -> Self {
-
-        let mut qemu_binary = config.qemu_binary.or(default.qemu_binary).expect("no qemu_binary specified");
+impl QemuSnapshotConfig {
+    pub fn new_from_loader(
+        default_config_folder: &str,
+        default: QemuSnapshotConfigLoader,
+        config: QemuSnapshotConfigLoader,
+    ) -> Self {
+        let mut qemu_binary = config
+            .qemu_binary
+            .or(default.qemu_binary)
+            .expect("no qemu_binary specified");
         let mut hda = config.hda.or(default.hda).expect("no hda specified");
-        let mut presnapshot = config.presnapshot.or(default.presnapshot).expect("no presnapshot specified");
+        let mut presnapshot = config
+            .presnapshot
+            .or(default.presnapshot)
+            .expect("no presnapshot specified");
         qemu_binary = into_absolute_path(default_config_folder, qemu_binary);
         hda = into_absolute_path(default_config_folder, hda);
         presnapshot = into_absolute_path(default_config_folder, presnapshot);
 
-        Self{
+        Self {
             qemu_binary: qemu_binary,
             hda: hda,
             presnapshot: presnapshot,
-            snapshot_path: config.snapshot_path.or(default.snapshot_path).expect("no snapshot_path specified"),
+            snapshot_path: config
+                .snapshot_path
+                .or(default.snapshot_path)
+                .expect("no snapshot_path specified"),
             debug: config.debug.or(default.debug).expect("no debug specified"),
         }
     }
@@ -98,13 +123,27 @@ pub enum FuzzRunnerConfig {
     QemuSnapshot(QemuSnapshotConfig),
 }
 
-impl FuzzRunnerConfig{
-    pub fn new_from_loader(default_config_folder: &str, default: FuzzRunnerConfigLoader, config: FuzzRunnerConfigLoader) -> Self {
-        match (default, config){
-            (FuzzRunnerConfigLoader::QemuKernel(d),
-            FuzzRunnerConfigLoader::QemuKernel(c)) => { Self::QemuKernel(QemuKernelConfig::new_from_loader(default_config_folder, d, c))},
-            (FuzzRunnerConfigLoader::QemuSnapshot(d),
-            FuzzRunnerConfigLoader::QemuSnapshot(c)) => { Self::QemuSnapshot(QemuSnapshotConfig::new_from_loader(default_config_folder, d, c))},
+impl FuzzRunnerConfig {
+    pub fn new_from_loader(
+        default_config_folder: &str,
+        default: FuzzRunnerConfigLoader,
+        config: FuzzRunnerConfigLoader,
+    ) -> Self {
+        match (default, config) {
+            (FuzzRunnerConfigLoader::QemuKernel(d), FuzzRunnerConfigLoader::QemuKernel(c)) => {
+                Self::QemuKernel(QemuKernelConfig::new_from_loader(
+                    default_config_folder,
+                    d,
+                    c,
+                ))
+            }
+            (FuzzRunnerConfigLoader::QemuSnapshot(d), FuzzRunnerConfigLoader::QemuSnapshot(c)) => {
+                Self::QemuSnapshot(QemuSnapshotConfig::new_from_loader(
+                    default_config_folder,
+                    d,
+                    c,
+                ))
+            }
             _ => panic!("conflicting FuzzRunner configs"),
         }
     }
@@ -140,66 +179,59 @@ pub struct FuzzerConfig {
     pub exit_after_first_crash: bool,
     pub write_protected_input_buffer: bool,
     pub cow_primary_size: Option<u64>,
-    pub ipt_filters: [IptFilter;4],
-    pub target_hash: Option<[u8; 20]>
+    pub ipt_filters: [IptFilter; 4],
 }
-impl FuzzerConfig{
-
-    fn load_target_hash(sharedir: &str) -> Option<[u8; 20]> {
-        let mut file = File::open(format!("{}/TARGET_HASH", sharedir)).ok()?;
-        let mut content = String::new();
-        file.read_to_string(&mut content).ok()?;
-    
-        let content = content.trim();
-
-        if content.len() < 40 {
-            return None;
-        }
-    
-        let mut bytes = [0u8; 20];
-        for i in 0..20 {
-            match u8::from_str_radix(&content[2 * i..2 * i + 2], 16) {
-                Ok(byte) => bytes[i] = byte,
-                Err(_) => return None, 
-            }
-        }
-    
-        Some(bytes)
-    }
-
-    pub fn new_from_loader(sharedir: &str, default: FuzzerConfigLoader, config: FuzzerConfigLoader) -> Self {
-
+impl FuzzerConfig {
+    pub fn new_from_loader(
+        sharedir: &str,
+        default: FuzzerConfigLoader,
+        config: FuzzerConfigLoader,
+    ) -> Self {
         let seed_path = config.seed_path.or(default.seed_path).unwrap();
         let seed_path_value = if seed_path.is_empty() {
             None
-        }
-        else{
+        } else {
             Some(into_absolute_path(&sharedir, seed_path))
         };
 
-        let target_hash = Self::load_target_hash(&sharedir);
-
-        Self{
-            spec_path: format!("{}/spec.msgp",sharedir),
-            workdir_path: config.workdir_path.or(default.workdir_path).expect("no workdir_path specified"),
-            bitmap_size: config.bitmap_size.or(default.bitmap_size).expect("no bitmap_size specified"),
+        Self {
+            spec_path: format!("{}/spec.msgp", sharedir),
+            workdir_path: config
+                .workdir_path
+                .or(default.workdir_path)
+                .expect("no workdir_path specified"),
+            bitmap_size: config
+                .bitmap_size
+                .or(default.bitmap_size)
+                .expect("no bitmap_size specified"),
             input_buffer_size: config.input_buffer_size,
-            mem_limit: config.mem_limit.or(default.mem_limit).expect("no mem_limit specified"),
-            time_limit: config.time_limit.or(default.time_limit).expect("no time_limit specified"),
+            mem_limit: config
+                .mem_limit
+                .or(default.mem_limit)
+                .expect("no mem_limit specified"),
+            time_limit: config
+                .time_limit
+                .or(default.time_limit)
+                .expect("no time_limit specified"),
             seed_path: seed_path_value,
             dict: config.dict.or(default.dict).expect("no dict specified"),
-            snapshot_placement: config.snapshot_placement.or(default.snapshot_placement).expect("no snapshot_placement specified"),
-            dump_python_code_for_inputs: config.dump_python_code_for_inputs.or(default.dump_python_code_for_inputs),
-            exit_after_first_crash: config.exit_after_first_crash.unwrap_or(default.exit_after_first_crash.unwrap_or(false)),
+            snapshot_placement: config
+                .snapshot_placement
+                .or(default.snapshot_placement)
+                .expect("no snapshot_placement specified"),
+            dump_python_code_for_inputs: config
+                .dump_python_code_for_inputs
+                .or(default.dump_python_code_for_inputs),
+            exit_after_first_crash: config
+                .exit_after_first_crash
+                .unwrap_or(default.exit_after_first_crash.unwrap_or(false)),
             write_protected_input_buffer: config.write_protected_input_buffer,
-            cow_primary_size: if config.cow_primary_size != 0 { Some( config.cow_primary_size as u64) } else { None },
-            ipt_filters: [
-                config.ip0,
-                config.ip1,
-                config.ip2,
-                config.ip3,
-            ],
-            target_hash: target_hash,
+            cow_primary_size: if config.cow_primary_size != 0 {
+                Some(config.cow_primary_size as u64)
+            } else {
+                None
+            },
+            ipt_filters: [config.ip0, config.ip1, config.ip2, config.ip3],
         }
     }
 }
@@ -210,13 +242,13 @@ pub enum QemuNyxRole {
     StandAlone,
 
     /* Serialize the VM snapshot after the root snapshot has been created.
-     * The serialized snapshot will be stored in the workdir and the snapshot 
+     * The serialized snapshot will be stored in the workdir and the snapshot
      * will later be used by the child processes. */
     Parent,
 
-    /* Wait for the snapshot to be created by the parent process and 
+    /* Wait for the snapshot to be created by the parent process and
      * deserialize it from the workdir. This way all child processes can
-     * mmap() the snapshot files and access the snapshot directly via shared memory. 
+     * mmap() the snapshot files and access the snapshot directly via shared memory.
      * Consequently, this will result in a much lower memory usage compared to spawning
      * multiple StandAlone-type instances. */
     Child,
@@ -229,7 +261,7 @@ pub struct RuntimeConfig {
      *  If None, hprintf will be redirected to stdout via println!().
      */
     hprintf_fd: Option<i32>,
-    
+
     /* Configurable option to specify the role of the process.
      *  If StandAlone, the process will not serialize the snapshot and keep everything in memory.
      *  If Parent, the process will create a snapshot and serialize it.
@@ -249,9 +281,9 @@ pub struct RuntimeConfig {
     aux_buffer_size: usize,
 }
 
-impl RuntimeConfig{
+impl RuntimeConfig {
     pub fn new() -> Self {
-        Self{
+        Self {
             hprintf_fd: None,
             process_role: QemuNyxRole::StandAlone,
             reuse_snapshot_path: None,
@@ -269,17 +301,17 @@ impl RuntimeConfig{
         &self.process_role
     }
 
-    pub fn set_hpintf_fd(&mut self, fd: i32){
+    pub fn set_hpintf_fd(&mut self, fd: i32) {
         /* sanitiy check to prevent invalid file descriptors via F_GETFD */
-        unsafe { 
+        unsafe {
             /* TODO: return error instead of panicking */
-            assert!(fcntl(fd, libc::F_GETFD) != -1); 
+            assert!(fcntl(fd, libc::F_GETFD) != -1);
         };
 
         self.hprintf_fd = Some(fd);
     }
 
-    pub fn set_process_role(&mut self, role: QemuNyxRole){
+    pub fn set_process_role(&mut self, role: QemuNyxRole) {
         self.process_role = role;
     }
 
@@ -287,8 +319,13 @@ impl RuntimeConfig{
         self.reuse_snapshot_path.clone()
     }
 
-    pub fn set_reuse_snapshot_path(&mut self, path: String){
-        let path = Path::new(&path).canonicalize().unwrap().to_str().unwrap().to_string();
+    pub fn set_reuse_snapshot_path(&mut self, path: String) {
+        let path = Path::new(&path)
+            .canonicalize()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
         self.reuse_snapshot_path = Some(path);
     }
 
@@ -296,7 +333,7 @@ impl RuntimeConfig{
         self.debug_mode
     }
 
-    pub fn set_debug_mode(&mut self, debug_mode: bool){
+    pub fn set_debug_mode(&mut self, debug_mode: bool) {
         self.debug_mode = debug_mode;
     }
 
@@ -304,24 +341,22 @@ impl RuntimeConfig{
         self.worker_id
     }
 
-    pub fn set_worker_id(&mut self, thread_id: usize){
+    pub fn set_worker_id(&mut self, thread_id: usize) {
         self.worker_id = thread_id;
     }
 
-    pub fn set_aux_buffer_size(&mut self, aux_buffer_size: usize) -> bool{
-
+    pub fn set_aux_buffer_size(&mut self, aux_buffer_size: usize) -> bool {
         if aux_buffer_size < DEFAULT_AUX_BUFFER_SIZE || (aux_buffer_size & 0xfff) != 0 {
             return false;
         }
 
         self.aux_buffer_size = aux_buffer_size;
-        return true
+        return true;
     }
 
     pub fn aux_buffer_size(&self) -> usize {
         self.aux_buffer_size
     }
-    
 }
 
 #[derive(Clone, Debug)]
@@ -331,11 +366,20 @@ pub struct Config {
     pub runtime: RuntimeConfig,
 }
 
-impl Config{
-    pub fn new_from_loader(sharedir: &str, default_config_folder: &str, default: ConfigLoader, config: ConfigLoader) -> Self{
-        Self{
-            runner: FuzzRunnerConfig::new_from_loader(&default_config_folder, default.runner, config.runner),
-            fuzz:  FuzzerConfig::new_from_loader(&sharedir, default.fuzz, config.fuzz),
+impl Config {
+    pub fn new_from_loader(
+        sharedir: &str,
+        default_config_folder: &str,
+        default: ConfigLoader,
+        config: ConfigLoader,
+    ) -> Self {
+        Self {
+            runner: FuzzRunnerConfig::new_from_loader(
+                &default_config_folder,
+                default.runner,
+                config.runner,
+            ),
+            fuzz: FuzzerConfig::new_from_loader(&sharedir, default.fuzz, config.fuzz),
             runtime: RuntimeConfig::new(),
         }
     }
@@ -343,18 +387,18 @@ impl Config{
     pub fn new_from_sharedir(sharedir: &str) -> Result<Self, String> {
         let path_to_config = format!("{}/config.ron", sharedir);
 
-        let cfg_file = match File::open(&path_to_config){
-            Ok(x) => {x},
+        let cfg_file = match File::open(&path_to_config) {
+            Ok(x) => x,
             Err(_) => return Err(format!("file or folder not found ({})!", path_to_config)),
-        }; 
+        };
 
-        let mut cfg: ConfigLoader = match ron::de::from_reader(cfg_file){
-            Ok(x) => {x},
+        let mut cfg: ConfigLoader = match ron::de::from_reader(cfg_file) {
+            Ok(x) => x,
             Err(x) => return Err(format!("invalid configuration ({})!", x)),
         };
 
-        let include_default_config_path = match cfg.include_default_config_path{
-            Some(x) => {x},
+        let include_default_config_path = match cfg.include_default_config_path {
+            Some(x) => x,
             None => return Err(format!("no path to default configuration given!")),
         };
 
@@ -362,16 +406,21 @@ impl Config{
         let default_config_folder = Path::new(&default_path).parent().unwrap().to_str().unwrap();
         cfg.include_default_config_path = Some(default_path.clone());
 
-        let default_file = match File::open(default_path.clone()){
+        let default_file = match File::open(default_path.clone()) {
             Ok(x) => x,
             Err(_) => return Err(format!("default config not found ({})!", default_path)),
         };
-         
-        let default: ConfigLoader = match ron::de::from_reader(default_file){
-            Ok(x) => {x},
+
+        let default: ConfigLoader = match ron::de::from_reader(default_file) {
+            Ok(x) => x,
             Err(x) => return Err(format!("invalid default configuration ({})!", x)),
         };
 
-        Ok(Self::new_from_loader(&sharedir, &default_config_folder, default, cfg))
+        Ok(Self::new_from_loader(
+            &sharedir,
+            &default_config_folder,
+            default,
+            cfg,
+        ))
     }
 }

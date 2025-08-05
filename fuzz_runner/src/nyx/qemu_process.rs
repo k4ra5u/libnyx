@@ -1,22 +1,20 @@
-use std::os::unix::prelude::FromRawFd;
-use std::path::PathBuf;
+use fs4::FileExt;
 use nix::sys::mman::*;
 use std::fs;
-use std::io;
 use std::fs::{File, OpenOptions};
+use std::io;
 use std::io::prelude::*;
 use std::os::unix::fs::symlink;
-use std::os::unix::io::IntoRawFd;
 use std::os::unix::io::AsRawFd;
+use std::os::unix::io::IntoRawFd;
 use std::os::unix::net::UnixStream;
+use std::os::unix::prelude::FromRawFd;
 use std::path::Path;
+use std::path::PathBuf;
+use std::process;
 use std::process::Child;
 use std::process::Command;
 use std::{thread, time};
-use std::process;
-use fs4::FileExt;
-
-use nix::unistd::gettid;
 
 use std::str;
 
@@ -24,16 +22,16 @@ extern crate colored; // not needed in Rust 2018
 
 use colored::*;
 
-
 use crate::nyx::aux_buffer::AuxBuffer;
-use crate::nyx::aux_buffer::{NYX_SUCCESS, NYX_CRASH, NYX_HPRINTF, NYX_TIMEOUT, NYX_ABORT, NYX_INPUT_WRITE};
+use crate::nyx::aux_buffer::{
+    NYX_ABORT, NYX_CRASH, NYX_HPRINTF, NYX_INPUT_WRITE, NYX_SUCCESS, NYX_TIMEOUT,
+};
 
-use crate::nyx::ijon_data::{SharedFeedbackData, FeedbackBuffer};
+use crate::nyx::ijon_data::{FeedbackBuffer, SharedFeedbackData};
 use crate::nyx::mem_barrier::mem_barrier;
 use crate::nyx::params::QemuParams;
 
 pub struct QemuProcess {
-
     process: Child,
 
     /* ptr to the aux buffer */
@@ -44,6 +42,8 @@ pub struct QemuProcess {
     pub ctrl: UnixStream,
     pub bitmap: &'static mut [u8],
     pub bitmap_size: usize,
+    pub quic_response: &'static mut [u8],
+    pub execution_path: &'static mut [u8],
     pub input_buffer_size: usize,
     pub payload: &'static mut [u8],
     pub params: QemuParams,
@@ -54,18 +54,18 @@ pub struct QemuProcess {
     hprintf_file: Option<File>,
 }
 
-fn execute_qemu(ctrl: &mut UnixStream) -> io::Result<()>{
+fn execute_qemu(ctrl: &mut UnixStream) -> io::Result<()> {
     ctrl.write_all(&[120_u8])?;
     Ok(())
 }
 
-fn wait_qemu(ctrl: &mut UnixStream) -> io::Result<()>{
+fn wait_qemu(ctrl: &mut UnixStream) -> io::Result<()> {
     let mut buf = [0];
     ctrl.read_exact(&mut buf)?;
     Ok(())
 }
 
-fn run_qemu(ctrl: &mut UnixStream) -> io::Result<()>{
+fn run_qemu(ctrl: &mut UnixStream) -> io::Result<()> {
     execute_qemu(ctrl)?;
     wait_qemu(ctrl)?;
     Ok(())
@@ -96,11 +96,10 @@ fn make_shared_ijon_data(file: File, size: usize) -> FeedbackBuffer {
 }
 
 impl QemuProcess {
-
     pub fn new(params: QemuParams) -> Result<QemuProcess, String> {
         Self::prepare_redqueen_workdir(&params.workdir, params.qemu_id);
 
-        if params.qemu_id == 0{
+        if params.qemu_id == 0 {
             println!("[!] libnyx: spawning qemu with:\n {}", params.cmd.join(" "));
         }
 
@@ -116,14 +115,52 @@ impl QemuProcess {
             .open(&shm_work_dir_path)
             .expect("couldn't open bitmap file");
 
-
-        if Path::new(&format!("{}/bitmap_{}", params.workdir, params.qemu_id)).exists(){
+        if Path::new(&format!("{}/bitmap_{}", params.workdir, params.qemu_id)).exists() {
             fs::remove_file(format!("{}/bitmap_{}", params.workdir, params.qemu_id)).unwrap();
         }
 
         symlink(
             &shm_work_dir_path,
             format!("{}/bitmap_{}", params.workdir, params.qemu_id),
+        )
+        .unwrap();
+
+        shm_work_dir_path.pop();
+        shm_work_dir_path.push("quic_response");
+
+        let quic_response_shm_f = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&shm_work_dir_path)
+            .expect("couldn't open bitmap file");
+
+        if Path::new(&format!("{}/quic_response_{}", params.workdir, params.qemu_id)).exists() {
+            fs::remove_file(format!("{}/quic_response_{}", params.workdir, params.qemu_id)).unwrap();
+        }
+
+        symlink(
+            &shm_work_dir_path,
+            format!("{}/quic_response_{}", params.workdir, params.qemu_id),
+        )
+        .unwrap();
+
+        shm_work_dir_path.pop();
+        shm_work_dir_path.push("execution_path");
+
+        let execution_path_shm_f = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&shm_work_dir_path)
+            .expect("couldn't open bitmap file");
+        if Path::new(&format!("{}/execution_path_{}", params.workdir, params.qemu_id)).exists() {
+            fs::remove_file(format!("{}/execution_path_{}", params.workdir, params.qemu_id)).unwrap();
+        }
+
+        symlink(
+            &shm_work_dir_path,
+            format!("{}/execution_path_{}", params.workdir, params.qemu_id),
         )
         .unwrap();
 
@@ -137,8 +174,7 @@ impl QemuProcess {
             .open(&shm_work_dir_path)
             .expect("couldn't open bitmap file");
 
-
-        if Path::new(&format!("{}/ijon_{}", params.workdir, params.qemu_id)).exists(){
+        if Path::new(&format!("{}/ijon_{}", params.workdir, params.qemu_id)).exists() {
             fs::remove_file(format!("{}/ijon_{}", params.workdir, params.qemu_id)).unwrap();
         }
 
@@ -158,7 +194,7 @@ impl QemuProcess {
             .open(&shm_work_dir_path)
             .expect("couldn't open payload file");
 
-        if Path::new(&format!("{}/payload_{}", params.workdir, params.qemu_id)).exists(){
+        if Path::new(&format!("{}/payload_{}", params.workdir, params.qemu_id)).exists() {
             fs::remove_file(format!("{}/payload_{}", params.workdir, params.qemu_id)).unwrap();
         }
 
@@ -170,34 +206,35 @@ impl QemuProcess {
 
         payload_shm_f.write_all(b"not_init").unwrap();
         bitmap_shm_f.set_len(params.bitmap_size as u64).unwrap();
-        ijon_buffer_shm_f.set_len(0x1000).unwrap();
+        quic_response_shm_f.set_len(0x100000).unwrap();
+        execution_path_shm_f.set_len(0x100000).unwrap();
+        ijon_buffer_shm_f.set_len(0x100000).unwrap();
 
         let mut bitmap_shared = make_shared_data(&bitmap_shm_f, params.bitmap_size);
+        let quic_response_shared = make_shared_data(&quic_response_shm_f, 0x100000);
+        let execution_path_shared = make_shared_data(&execution_path_shm_f, 0x100000);
         let mut payload_shared = make_shared_data(&payload_shm_f, params.payload_size);
 
-        let ijon_shared = make_shared_data(&ijon_buffer_shm_f, 0x1000);
-        let ijon_feedback_buffer = make_shared_ijon_data(ijon_buffer_shm_f, 0x1000);
+        let ijon_shared = make_shared_data(&ijon_buffer_shm_f, 0x100000);
+        let ijon_feedback_buffer = make_shared_ijon_data(ijon_buffer_shm_f, 0x100000);
 
-        let mut child = if params.dump_python_code_for_inputs{
+        let mut child = if params.dump_python_code_for_inputs {
             Command::new(&params.cmd[0])
-            .args(&params.cmd[1..])
-            .env("DUMP_PAYLOAD_MODE", "TRUE")
-            .spawn()
-            .expect("failed to execute process")            
-        }
-        else{
+                .args(&params.cmd[1..])
+                .env("DUMP_PAYLOAD_MODE", "TRUE")
+                .spawn()
+                .expect("failed to execute process")
+        } else {
             Command::new(&params.cmd[0])
-            .args(&params.cmd[1..])
-            .spawn()
-            .expect("failed to execute process")
+                .args(&params.cmd[1..])
+                .spawn()
+                .expect("failed to execute process")
         };
 
         let mut control = loop {
             match UnixStream::connect(&params.control_filename) {
                 Ok(stream) => break stream,
-                _ => {
-                    thread::sleep(time::Duration::from_millis(1))
-                },
+                _ => thread::sleep(time::Duration::from_millis(1)),
             }
         };
 
@@ -215,15 +252,15 @@ impl QemuProcess {
             AuxBuffer::new(aux_shm_f, params.aux_buffer_size)
         };
 
-        match aux_buffer.validate_header(){
+        match aux_buffer.validate_header() {
             Err(x) => {
                 child.kill().unwrap();
                 child.wait().unwrap();
                 return Err(x);
-            },
-            Ok(_) => {},
+            }
+            Ok(_) => {}
         }
-        if params.write_protected_input_buffer{
+        if params.write_protected_input_buffer {
             if params.qemu_id == 0 {
                 println!("[!] libnyx: input buffer is write protected");
             }
@@ -232,20 +269,25 @@ impl QemuProcess {
         }
 
         let mut hprintf_file = match params.hprintf_fd {
-            Some(fd) =>  Some(unsafe { File::from_raw_fd(fd) }),
+            Some(fd) => Some(unsafe { File::from_raw_fd(fd) }),
             None => None,
-        }; 
+        };
 
         loop {
-
             match aux_buffer.result.exec_result_code {
-                NYX_HPRINTF     => {
+                NYX_HPRINTF => {
                     let len = aux_buffer.misc.len;
-                    QemuProcess::output_hprintf(&mut hprintf_file, &String::from_utf8_lossy(&aux_buffer.misc.data[0..len as usize]).yellow());
-                },
+                    QemuProcess::output_hprintf(
+                        &mut hprintf_file,
+                        &String::from_utf8_lossy(&aux_buffer.misc.data[0..len as usize]).yellow(),
+                    );
+                }
                 NYX_ABORT => {
                     let len = aux_buffer.misc.len;
-                    let msg = format!("agent abort() -> \n\t{}", String::from_utf8_lossy(&aux_buffer.misc.data[0..len as usize]).red());
+                    let msg = format!(
+                        "agent abort() -> \n\t{}",
+                        String::from_utf8_lossy(&aux_buffer.misc.data[0..len as usize]).red()
+                    );
 
                     /* get rid of this process */
                     child.kill().unwrap();
@@ -253,7 +295,7 @@ impl QemuProcess {
 
                     return Err(msg);
                 }
-                NYX_SUCCESS => {},
+                NYX_SUCCESS => {}
                 x => {
                     panic!(" -> unkown type ? {}", x);
                 }
@@ -262,9 +304,9 @@ impl QemuProcess {
             if aux_buffer.result.state == 3 {
                 break;
             }
-            if run_qemu(&mut control).is_err(){
+            if run_qemu(&mut control).is_err() {
                 return Err(format!("failed to establish fuzzing loop..."));
-            } 
+            }
         }
 
         let mut bitmap_size = params.bitmap_size as usize;
@@ -272,17 +314,23 @@ impl QemuProcess {
         if aux_buffer.cap.agent_coverage_bitmap_size != 0 {
             //let file_len = bitmap_shm_f.metadata().unwrap().len();
             bitmap_size = aux_buffer.cap.agent_coverage_bitmap_size as usize;
-            if aux_buffer.cap.agent_coverage_bitmap_size as usize > bitmap_shared.len(){
+            if aux_buffer.cap.agent_coverage_bitmap_size as usize > bitmap_shared.len() {
                 //println!("[!] libnyx: agent requests a differnt coverage bitmap size: {:x} (current: {:x})", aux_buffer.cap.agent_coverage_bitmap_size as u32, file_len);
-                bitmap_shared = make_shared_data(&bitmap_shm_f, aux_buffer.cap.agent_coverage_bitmap_size as usize);
+                bitmap_shared = make_shared_data(
+                    &bitmap_shm_f,
+                    aux_buffer.cap.agent_coverage_bitmap_size as usize,
+                );
             }
         }
 
         let mut input_buffer_size = params.payload_size as usize;
         if aux_buffer.cap.agent_input_buffer_size != 0 {
             input_buffer_size = aux_buffer.cap.agent_input_buffer_size as usize;
-            if aux_buffer.cap.agent_input_buffer_size as usize > payload_shared.len(){
-                payload_shared = make_shared_data(&payload_shm_f, aux_buffer.cap.agent_input_buffer_size as usize);
+            if aux_buffer.cap.agent_input_buffer_size as usize > payload_shared.len() {
+                payload_shared = make_shared_data(
+                    &payload_shm_f,
+                    aux_buffer.cap.agent_input_buffer_size as usize,
+                );
             }
         }
 
@@ -307,6 +355,8 @@ impl QemuProcess {
             ctrl: control,
             bitmap: bitmap_shared,
             bitmap_size: bitmap_size,
+            quic_response: quic_response_shared,
+            execution_path: execution_path_shared,
             input_buffer_size: input_buffer_size,
             payload: payload_shared,
             params,
@@ -316,37 +366,37 @@ impl QemuProcess {
         });
     }
 
-    fn output_hprintf(hprintf_file: &mut Option<File>, msg: &str){
+    fn output_hprintf(hprintf_file: &mut Option<File>, msg: &str) {
         match hprintf_file {
             Some(ref mut f) => {
                 f.write_fmt(format_args!("{}", msg)).unwrap();
-            },
+            }
             None => {
                 print!("{}", msg);
             }
         }
     }
 
-    pub fn aux_buffer(&self) -> &AuxBuffer{
+    pub fn aux_buffer(&self) -> &AuxBuffer {
         &self.aux
     }
 
-    pub fn aux_buffer_mut(&mut self) -> &mut AuxBuffer{
+    pub fn aux_buffer_mut(&mut self) -> &mut AuxBuffer {
         &mut self.aux
     }
 
-    pub fn set_hprintf_fd(&mut self, fd: i32){
+    pub fn set_hprintf_fd(&mut self, fd: i32) {
         self.hprintf_file = unsafe { Some(File::from_raw_fd(fd)) };
     }
 
-    pub fn send_payload(&mut self) -> io::Result<()>{
+    pub fn send_payload(&mut self) -> io::Result<()> {
         let mut old_address: u64 = 0;
 
         loop {
             mem_barrier();
             match run_qemu(&mut self.ctrl) {
                 Err(x) => return Err(x),
-                Ok(_) => {},
+                Ok(_) => {}
             }
             mem_barrier();
 
@@ -362,31 +412,37 @@ impl QemuProcess {
                     mem_barrier();
                     match run_qemu(&mut self.ctrl) {
                         Err(x) => return Err(x),
-                        Ok(_) => {},
+                        Ok(_) => {}
                     }
                     mem_barrier();
 
                     continue;
-                }
-                else{
+                } else {
                     println!("libnyx: cannot dump missing page -> {:x}", v);
                 }
             }
-            
+
             match self.aux.result.exec_result_code {
-                NYX_HPRINTF     => {
+                NYX_HPRINTF => {
                     let len = self.aux.misc.len;
-                    QemuProcess::output_hprintf(&mut self.hprintf_file, &String::from_utf8_lossy(&self.aux.misc_data_slice()[0..len as usize]).yellow());
+                    QemuProcess::output_hprintf(
+                        &mut self.hprintf_file,
+                        &String::from_utf8_lossy(&self.aux.misc_data_slice()[0..len as usize])
+                            .yellow(),
+                    );
                     continue;
-                },
-                NYX_ABORT       => {
+                }
+                NYX_ABORT => {
                     let len = self.aux.misc.len;
-                    println!("[!] libnyx: agent abort() -> \"{}\"", String::from_utf8_lossy(&self.aux.misc_data_slice()[0..len as usize]).red());
+                    println!(
+                        "[!] libnyx: agent abort() -> \"{}\"",
+                        String::from_utf8_lossy(&self.aux.misc_data_slice()[0..len as usize]).red()
+                    );
                     break;
-                },
-                NYX_SUCCESS | NYX_CRASH | NYX_INPUT_WRITE | NYX_TIMEOUT      => {
+                }
+                NYX_SUCCESS | NYX_CRASH | NYX_INPUT_WRITE | NYX_TIMEOUT => {
                     break;
-                },
+                }
                 x => {
                     panic!("[!] libnyx: ERROR -> unkown Nyx exec result code: {}", x);
                 }
@@ -395,7 +451,7 @@ impl QemuProcess {
         Ok(())
     }
 
-    pub fn set_timeout(&mut self, timeout: std::time::Duration){
+    pub fn set_timeout(&mut self, timeout: std::time::Duration) {
         self.aux.config.timeout_sec = timeout.as_secs() as u8;
         self.aux.config.timeout_usec = timeout.subsec_micros();
         self.aux.config.changed = 1;
@@ -405,18 +461,41 @@ impl QemuProcess {
         self.process.wait().unwrap();
     }
 
-    fn remove_shm_work_dir(&mut self){
-
+    fn remove_shm_work_dir(&mut self) {
         /* move originals into workdir (in case we need the data to debug stuff) */
         let shm_path = self.shm_work_dir.to_str().unwrap();
-        fs::remove_file(&format!("{}/bitmap_{}", &self.params.workdir, self.params.qemu_id)).unwrap();
-        fs::copy(&format!("{}/bitmap", shm_path), &format!("{}/bitmap_{}", &self.params.workdir, self.params.qemu_id)).unwrap();
+        fs::remove_file(&format!(
+            "{}/bitmap_{}",
+            &self.params.workdir, self.params.qemu_id
+        ))
+        .unwrap();
+        fs::copy(
+            &format!("{}/bitmap", shm_path),
+            &format!("{}/bitmap_{}", &self.params.workdir, self.params.qemu_id),
+        )
+        .unwrap();
 
-        fs::remove_file(&format!("{}/payload_{}", &self.params.workdir, self.params.qemu_id)).unwrap();
-        fs::copy(&format!("{}/input", shm_path), &format!("{}/payload_{}", &self.params.workdir, self.params.qemu_id)).unwrap();
+        fs::remove_file(&format!(
+            "{}/payload_{}",
+            &self.params.workdir, self.params.qemu_id
+        ))
+        .unwrap();
+        fs::copy(
+            &format!("{}/input", shm_path),
+            &format!("{}/payload_{}", &self.params.workdir, self.params.qemu_id),
+        )
+        .unwrap();
 
-        fs::remove_file(&format!("{}/ijon_{}", &self.params.workdir, self.params.qemu_id)).unwrap();
-        fs::copy(&format!("{}/ijon", shm_path), &format!("{}/ijon_{}", &self.params.workdir, self.params.qemu_id)).unwrap();
+        fs::remove_file(&format!(
+            "{}/ijon_{}",
+            &self.params.workdir, self.params.qemu_id
+        ))
+        .unwrap();
+        fs::copy(
+            &format!("{}/ijon", shm_path),
+            &format!("{}/ijon_{}", &self.params.workdir, self.params.qemu_id),
+        )
+        .unwrap();
 
         /* remove this shm directory */
         fs::remove_dir_all(&self.shm_work_dir).unwrap();
@@ -429,17 +508,17 @@ impl QemuProcess {
         self.remove_shm_work_dir();
     }
 
-    pub fn wait_for_workdir(workdir: &str){
+    pub fn wait_for_workdir(workdir: &str) {
         println!("[!] libnyx: waiting for workdir to be created by parent process...");
-        
+
         let files = vec![
             "page_cache.lock",
             "page_cache.addr",
             "page_cache.addr",
-            "snapshot/fast_snapshot.qemu_state"
+            "snapshot/fast_snapshot.qemu_state",
         ];
         for file in files.iter() {
-            while !Path::new(&format!("{}/{}", workdir, file)).exists(){
+            while !Path::new(&format!("{}/{}", workdir, file)).exists() {
                 thread::sleep(time::Duration::from_secs(1));
             }
         }
@@ -483,62 +562,70 @@ impl QemuProcess {
             .open(format!("{}/page_cache.addr", workdir))
             .unwrap();
 
-        OpenOptions::new().create(true).write(true).open(format!("{}/program", workdir)).unwrap();
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(format!("{}/program", workdir))
+            .unwrap();
 
         //println!("IMPORT STUFF FOR {:?}", seed_path);
         if let Some(path) = seed_path {
             let pattern = format!("{}/*", path);
             //println!("IMPORT STUFF FOR {}", pattern);
-            for (i,p) in glob::glob(&pattern).expect("couldn't glob seed pattern??").enumerate()
+            for (i, p) in glob::glob(&pattern)
+                .expect("couldn't glob seed pattern??")
+                .enumerate()
             {
-                let src = p.unwrap_or_else(|e| panic!("invalid seed path found {:?}",e));
+                let src = p.unwrap_or_else(|e| panic!("invalid seed path found {:?}", e));
                 //println!("import {} to {}/seeds/seed_{}",src.to_string_lossy(), workdir,i);
-                let dst = format!("{}/seeds/seed_{}.bin",workdir, i);
-                fs::copy(&src, &dst).unwrap_or_else(|e| panic!("couldn't copy seed {} to {} {:?}",src.to_string_lossy(),dst,e));
+                let dst = format!("{}/seeds/seed_{}.bin", workdir, i);
+                fs::copy(&src, &dst).unwrap_or_else(|e| {
+                    panic!(
+                        "couldn't copy seed {} to {} {:?}",
+                        src.to_string_lossy(),
+                        dst,
+                        e
+                    )
+                });
             }
         }
     }
 
     fn prepare_redqueen_workdir(workdir: &str, qemu_id: usize) {
         fs::create_dir_all(format!("{}/redqueen_workdir_{}", workdir, qemu_id))
-            .expect("couldn't initialize workdir");   
+            .expect("couldn't initialize workdir");
     }
 
-    fn remove_unused_shm_work_dirs(){
+    fn remove_unused_shm_work_dirs() {
         /* find and remove orphaned Nyx shm workdirs in /dev/shm */
-        for p in glob::glob(&format!("/dev/shm/nyx_*")).expect("couldn't glob??"){
+        for p in glob::glob(&format!("/dev/shm/nyx_*")).expect("couldn't glob??") {
             let mut path = p.unwrap();
-            
+
             path.push("lock");
-            if path.exists(){
+            if path.exists() {
+                let file_lock = match OpenOptions::new().read(true).open(&path) {
+                    Err(x) => {
+                        println!("Warning: {}", x);
+                        Err(x)
+                    }
+                    x => x,
+                };
 
-                let file_lock = match OpenOptions::new()
-                    .read(true)
-                    .open(&path){
-                        Err(x) => {
-                            println!("Warning: {}", x);
-                            Err(x)
-                        },
-                        x => {
-                            x
-                        },
-                    };
-
-                if file_lock.is_ok(){
+                if file_lock.is_ok() {
                     path.pop();
 
-                    match file_lock.unwrap().try_lock_exclusive(){
+                    match file_lock.unwrap().try_lock_exclusive() {
                         Ok(_) => {
                             if path.starts_with("/dev/shm/") {
-                                match fs::remove_dir_all(path){
+                                match fs::remove_dir_all(path) {
                                     Err(x) => {
                                         println!("Warning: {}", x);
-                                    },
-                                    _ => {},
+                                    }
+                                    _ => {}
                                 }
                             }
-                        },
-                        Err(_) => {},
+                        }
+                        Err(_) => {}
                     }
                 }
             }
@@ -551,12 +638,13 @@ impl QemuProcess {
     }
 
     fn create_shm_work_dir() -> (PathBuf, File) {
-        let shm_work_dir_path_str = format!("/dev/shm/nyx_{}_{}/", process::id(), gettid());
+        let random_id = rand::random::<u16>();
+        let shm_work_dir_path_str = format!("/dev/shm/nyx_{}_{}/", process::id(), random_id);
         let shm_work_dir_path = PathBuf::from(&shm_work_dir_path_str);
 
         fs::create_dir_all(&shm_work_dir_path).expect("couldn't initialize shm work directory");
 
-        let file_lock_path_str = format!("/dev/shm/nyx_{}_{}/lock", process::id(), gettid());
+        let file_lock_path_str = format!("/dev/shm/nyx_{}_{}/lock", process::id(), random_id);
         let file_lock_path = Path::new(&file_lock_path_str);
 
         let file_lock = OpenOptions::new()
@@ -572,7 +660,7 @@ impl QemuProcess {
     }
 }
 
-/* Helper function to remove a Nyx workdir safely. Returns an error if 
+/* Helper function to remove a Nyx workdir safely. Returns an error if
  * expected sub dirs are missing or the path does not exist */
 pub fn remove_workdir_safe(workdir: &str) -> Result<(), String> {
     let folders = vec![

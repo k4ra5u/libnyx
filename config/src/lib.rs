@@ -1,8 +1,8 @@
+extern crate libc;
+extern crate ron;
 extern crate serde;
 extern crate serde_derive;
-extern crate ron;
-extern crate libc;
 
-mod loader;
 mod config;
+mod loader;
 pub use config::*;

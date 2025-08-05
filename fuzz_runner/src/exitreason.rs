@@ -22,7 +22,7 @@ impl ExitReason {
         };
     }
 
-    pub fn is_normal(&self) -> bool{
+    pub fn is_normal(&self) -> bool {
         use ExitReason::*;
         match self {
             Normal(_) => return true,
@@ -30,7 +30,7 @@ impl ExitReason {
         }
     }
 
-    pub fn name(&self) -> &str{
+    pub fn name(&self) -> &str {
         use ExitReason::*;
         match self {
             Normal(_) => return "normal",
